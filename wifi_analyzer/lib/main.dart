@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:wifi_scan/wifi_scan.dart';
 import 'dart:math' as math;
+import 'package:share_plus/share_plus.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:file_saver/file_saver.dart'; // 导出到 Downloads
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -101,12 +104,43 @@ class _HomePageState extends State<HomePage> {
   final searchCtrl = TextEditingController();
   Band band = Band.any;
 
+  File? _lastJsonFile; // 最近保存的 JSON
+
   @override
   void dispose() {
     remarkCtrl.dispose();
     searchCtrl.dispose();
     super.dispose();
   }
+
+  /* ---------- JSON 文件工具 ---------- */
+
+  Future<File> _jsonFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/wifi_scans.json');
+  }
+
+  Future<List<dynamic>> _readAllEntries() async {
+    final file = await _jsonFile();
+    if (await file.exists()) {
+      final t = await file.readAsString();
+      if (t.trim().isNotEmpty) {
+        try {
+          final v = jsonDecode(t);
+          if (v is List) return v;
+        } catch (_) {}
+      }
+    }
+    return [];
+  }
+
+  Future<void> _writeAllEntries(List<dynamic> all) async {
+    final file = await _jsonFile();
+    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(all), flush: true);
+    _lastJsonFile = file;
+  }
+
+  /* ---------- 扫描 ---------- */
 
   Future<void> scanOnce() async {
     setState(() {
@@ -150,6 +184,8 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  /* ---------- 保存 / 打开 / 分享 / 导出 ---------- */
+
   Future<void> saveToJson() async {
     if (aps.isEmpty) {
       if (!mounted) return;
@@ -158,19 +194,8 @@ class _HomePageState extends State<HomePage> {
       );
       return;
     }
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/wifi_scans.json');
 
-    // 读已有列表（如果没有则空列表）
-    List<dynamic> all = [];
-    if (await file.exists()) {
-      final t = await file.readAsString();
-      if (t.trim().isNotEmpty) {
-        try { all = jsonDecode(t) as List; } catch (_) {}
-      }
-    }
-
-    // 本次条目（已按 RSSI 排序）
+    final all = await _readAllEntries();
     final entry = {
       'timestamp': DateTime.now().toIso8601String(),
       'remark': remarkCtrl.text.trim(),
@@ -178,22 +203,93 @@ class _HomePageState extends State<HomePage> {
       'results': aps.map((e) => e.toJson()).toList(),
     };
     all.add(entry);
-
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(all), flush: true);
+    await _writeAllEntries(all);
 
     if (!mounted) return;
+    final f = _lastJsonFile!;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已保存到 ${file.path.split('/').last}（应用文档目录）')),
+      SnackBar(
+        content: Text('已保存到 ${f.path.split('/').last}（应用文档目录）'),
+        action: SnackBarAction(label: '打开', onPressed: _openJson),
+      ),
     );
   }
+
+  Future<void> _openJson() async {
+    final f = _lastJsonFile ?? await _jsonFile();
+    if (await f.exists()) {
+      final res = await OpenFilex.open(f.path, type: 'application/json');
+      if (res.type != ResultType.done && mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('无法打开，文件在：${f.path}')));
+      }
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('尚未生成 wifi_scans.json')));
+    }
+  }
+
+  Future<void> _shareJson() async {
+    final f = _lastJsonFile ?? await _jsonFile();
+    if (await f.exists()) {
+      await Share.shareXFiles([XFile(f.path)], text: 'Wi-Fi 扫描记录（JSON）');
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('尚未生成 wifi_scans.json')));
+    }
+  }
+
+  /// 导出到「Downloads」（Android 使用 MediaStore/SAF，其他平台走系统保存对话框）
+  Future<void> _exportToDownloads() async {
+    final f = _lastJsonFile ?? await _jsonFile();
+    if (!await f.exists()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('尚未生成 wifi_scans.json')));
+      return;
+    }
+    try {
+      final bytes = await f.readAsBytes();
+      final savedPath = await FileSaver.instance.saveFile(
+        name: 'wifi_scans',
+        bytes: bytes,
+        ext: 'json',
+        mimeType: MimeType.other,
+      ); // Android: Downloads；iOS/桌面：系统保存面板
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已导出：$savedPath')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+    }
+  }
+
+  /* ---------- 历史记录（查看/删除） ---------- */
+
+  Future<void> _openHistory() async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const HistoryPage()),
+    );
+    if (changed == true) {
+      // 历史被修改（删除/清空），提示一下
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('历史已更新')));
+    }
+  }
+
+  /* ---------- 过滤 ---------- */
 
   List<AP> get _filtered {
     final q = searchCtrl.text.trim().toLowerCase();
     return aps.where((e) {
       final okBand = _inBand(e.frequency, band);
-      final okQuery = q.isEmpty ||
-          e.ssid.toLowerCase().contains(q) ||
-          e.bssid.toLowerCase().contains(q);
+      final okQuery =
+          q.isEmpty || e.ssid.toLowerCase().contains(q) || e.bssid.toLowerCase().contains(q);
       return okBand && okQuery;
     }).toList();
   }
@@ -208,14 +304,34 @@ class _HomePageState extends State<HomePage> {
         title: const Text('Wi-Fi Analyzer'),
         actions: [
           IconButton(
-            tooltip: '重新扫描',
-            onPressed: scanning ? null : scanOnce,
-            icon: const Icon(Icons.refresh),
+            tooltip: '历史',
+            onPressed: _openHistory,
+            icon: const Icon(Icons.history),
+          ),
+          IconButton(
+            tooltip: '打开 JSON',
+            onPressed: _openJson,
+            icon: const Icon(Icons.insert_drive_file_outlined),
+          ),
+          IconButton(
+            tooltip: '分享 JSON',
+            onPressed: _shareJson,
+            icon: const Icon(Icons.ios_share),
+          ),
+          IconButton(
+            tooltip: '导出到 Downloads',
+            onPressed: _exportToDownloads,
+            icon: const Icon(Icons.download_outlined),
           ),
           IconButton(
             tooltip: '保存 JSON（统一文件）',
             onPressed: hasData ? saveToJson : null,
             icon: const Icon(Icons.save_alt),
+          ),
+          IconButton(
+            tooltip: '重新扫描',
+            onPressed: scanning ? null : scanOnce,
+            icon: const Icon(Icons.refresh),
           ),
         ],
       ),
@@ -255,8 +371,8 @@ class _HomePageState extends State<HomePage> {
                       segments: const [
                         ButtonSegment(value: Band.any, label: Text('全部')),
                         ButtonSegment(value: Band.b24, label: Text('2.4G')),
-                        ButtonSegment(value: Band.b5,  label: Text('5G')),
-                        ButtonSegment(value: Band.b6,  label: Text('6G')),
+                        ButtonSegment(value: Band.b5, label: Text('5G')),
+                        ButtonSegment(value: Band.b6, label: Text('6G')),
                       ],
                       selected: {band},
                       onSelectionChanged: (s) => setState(() => band = s.first),
@@ -357,6 +473,169 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+/* ------------------------------ 历史页：查看 + 删除 ------------------------------ */
+
+class HistoryPage extends StatefulWidget {
+  const HistoryPage({super.key});
+
+  @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  List<dynamic> entries = [];
+  bool loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<File> _jsonFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/wifi_scans.json');
+  }
+
+  Future<void> _load() async {
+    final f = await _jsonFile();
+    if (await f.exists()) {
+      final t = await f.readAsString();
+      if (t.trim().isNotEmpty) {
+        try {
+          final v = jsonDecode(t);
+          if (v is List) entries = v;
+        } catch (_) {}
+      }
+    }
+    setState(() => loading = false);
+  }
+
+  Future<void> _persist() async {
+    final f = await _jsonFile();
+    await f.writeAsString(const JsonEncoder.withIndent('  ').convert(entries), flush: true);
+  }
+
+  Future<void> _deleteAt(int index) async {
+    final removed = entries.removeAt(index);
+    await _persist();
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已删除：${_titleOf(removed)}')),
+    );
+    Navigator.of(context).pop(true); // 通知上层有变更
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryPage())); // 重新进入刷新
+  }
+
+  Future<void> _clearAll() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('清空历史？'),
+        content: const Text('这将删除 wifi_scans.json 中的所有记录，不可恢复。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    entries.clear();
+    await _persist();
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已清空历史')));
+    Navigator.of(context).pop(true);
+  }
+
+  String _titleOf(dynamic e) {
+    try {
+      final ts = DateTime.tryParse(e['timestamp'] ?? '')?.toLocal();
+      final remark = (e['remark'] ?? '').toString();
+      final count = e['count'] ?? (e['results'] as List?)?.length ?? 0;
+      final timeStr = ts != null ? ts.toString().replaceFirst('T', ' ').split('.').first : '未知时间';
+      return '$timeStr（$count 条）${remark.isEmpty ? '' : ' · $remark'}';
+    } catch (_) {
+      return '未知记录';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('历史记录'),
+        actions: [
+          IconButton(
+            tooltip: '清空全部',
+            onPressed: entries.isEmpty ? null : _clearAll,
+            icon: const Icon(Icons.delete_forever),
+          ),
+        ],
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : entries.isEmpty
+          ? const Center(child: Text('暂无历史'))
+          : ListView.separated(
+        itemCount: entries.length,
+        separatorBuilder: (_, __) => const Divider(height: 1),
+        itemBuilder: (ctx, i) {
+          final e = entries[i];
+          final title = _titleOf(e);
+          final results = (e['results'] as List?) ?? [];
+          return Dismissible(
+            key: ValueKey('hist_$i'),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              color: Theme.of(context).colorScheme.errorContainer,
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Icon(Icons.delete, color: Theme.of(context).colorScheme.onErrorContainer),
+            ),
+            confirmDismiss: (_) async {
+              return await showDialog<bool>(
+                context: context,
+                builder: (_) => AlertDialog(
+                  title: const Text('删除这条记录？'),
+                  content: Text(title),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+                    FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
+                  ],
+                ),
+              );
+            },
+            onDismissed: (_) => _deleteAt(i),
+            child: ListTile(
+              title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+              subtitle: Text('包含 ${results.length} 个网络'),
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: const Text('删除这条记录？'),
+                      content: Text(title),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+                        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
+                      ],
+                    ),
+                  );
+                  if (ok == true) _deleteAt(i);
+                },
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 /* ------------------------------ 绘图 ------------------------------ */
 
 class WifiChartPainter extends CustomPainter {
@@ -403,7 +682,7 @@ class WifiChartPainter extends CustomPainter {
       ..color = axisColor;
     canvas.drawRect(chart, axis);
 
-    // ===== 只用“被占用的信道”来决定范围与刻度 =====
+    // 只用“被占用的信道”
     final occupied = aps.map((e) => e.channel).where((c) => c > 0).toSet().toList()
       ..sort();
     int minCh, maxCh;
@@ -430,7 +709,7 @@ class WifiChartPainter extends CustomPainter {
       _drawText(canvas, '$r dBm', Offset(padding.left - 44, y - 7),
           TextStyle(fontSize: 11, color: textColor.withOpacity(0.75)));
     }
-    // X 轴刻度：仅显示“占用的信道”（过多时做抽样避免重叠）
+    // X 轴刻度：仅显示占用信道（抽样防重叠）
     if (occupied.isNotEmpty) {
       final step = (occupied.length <= 18) ? 1 : (occupied.length / 18).ceil();
       for (int i = 0; i < occupied.length; i += step) {
@@ -465,18 +744,16 @@ class WifiChartPainter extends CustomPainter {
       Colors.brown.shade700,
     ];
 
-    // ===== 钟形峰：从“底线”起，不再“漂浮” =====
+    // 钟形峰：落在底线
     const samples = 48;
     int colorIdx = 0;
     int labelIdx = 0;
-    final baseY = chart.bottom - 1; // 统一把峰脚落在底部
+    final baseY = chart.bottom - 1;
 
     for (final ap in aps.where((e) => e.channel > 0)) {
       final color = palette[colorIdx++ % palette.length];
 
-      // 半宽：2.4G≈±2ch；5/6G≈±4ch
       final halfWidthCh = ap.frequency < 2500 ? 2.0 : 4.0;
-
       final mu = ap.channel.toDouble();
       final sigma = halfWidthCh / 2.0;
       final topY = yOf(ap.rssi);
@@ -489,8 +766,7 @@ class WifiChartPainter extends CustomPainter {
       for (int i = 0; i <= samples; i++) {
         final ch = leftCh + (rightCh - leftCh) * (i / samples);
         final x = xOf(ch);
-        final g = math.exp(
-            -0.5 * math.pow((ch - mu) / sigma, 2).toDouble());
+        final g = math.exp(-0.5 * math.pow((ch - mu) / sigma, 2).toDouble());
         final y = (baseY - amplitude * g).toDouble();
         if (i == 0) {
           path.moveTo(x, y);
@@ -519,19 +795,17 @@ class WifiChartPainter extends CustomPainter {
       canvas.drawPath(path, fill);
       canvas.drawPath(path, stroke);
 
-      // 峰顶标签（轻微错位）
+      // 标签
       final label = ap.ssid.isEmpty ? ap.bssid : ap.ssid;
       final tp = _measure(
         label,
-        const TextStyle(
-            fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white),
+        const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white),
         maxWidth: 160,
       );
       final cx = xOf(mu);
       final dy = 14 + (labelIdx++ % 3) * 10;
       final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-            cx - tp.width / 2 - 6, topY - tp.height - dy, tp.width + 12, tp.height + 6),
+        Rect.fromLTWH(cx - tp.width / 2 - 6, topY - tp.height - dy, tp.width + 12, tp.height + 6),
         const Radius.circular(6),
       );
       final bg = Paint()..color = Colors.black.withOpacity(0.45);
@@ -539,7 +813,6 @@ class WifiChartPainter extends CustomPainter {
       tp.paint(canvas, Offset(rect.left + 6, rect.top + 3));
     }
 
-    // 标题
     _drawText(canvas, 'RSSI (dBm)', Offset(8, chart.top - 12),
         TextStyle(fontSize: 12, color: textColor));
     _drawText(canvas, '信道 (Channel)', Offset(chart.right - 110, chart.bottom + 22),
