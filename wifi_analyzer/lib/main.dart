@@ -380,13 +380,12 @@ class WifiChartPainter extends CustomPainter {
     // 颜色
     final textColor =
     brightness == Brightness.dark ? Colors.white : Colors.black87;
-    final gridColor = (brightness == Brightness.dark
-        ? Colors.white70
-        : Colors.black87)
+    final gridColor =
+    (brightness == Brightness.dark ? Colors.white70 : Colors.black87)
         .withOpacity(0.22);
     final axisColor = gridColor.withOpacity(0.55);
 
-    // 网格
+    // 背景网格（水平）
     final grid = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.5
@@ -404,20 +403,16 @@ class WifiChartPainter extends CustomPainter {
       ..color = axisColor;
     canvas.drawRect(chart, axis);
 
-    // X 轴范围（信道）
+    // ===== 只用“被占用的信道”来决定范围与刻度 =====
+    final occupied = aps.map((e) => e.channel).where((c) => c > 0).toSet().toList()
+      ..sort();
     int minCh, maxCh;
-    if (aps.isEmpty) {
+    if (occupied.isEmpty) {
       minCh = 1;
       maxCh = 165;
     } else {
-      final chans = aps.map((e) => e.channel).where((c) => c > 0).toList();
-      chans.sort();
-      if (chans.isEmpty) {
-        minCh = 1; maxCh = 165;
-      } else {
-        minCh = (chans.first - 3).clamp(1, 1000);
-        maxCh = (chans.last + 3).clamp(minCh + 10, 1000);
-      }
+      minCh = (occupied.first - 3).clamp(1, 1000);
+      maxCh = (occupied.last + 3).clamp(minCh + 10, 1000);
     }
 
     double xOf(num ch) =>
@@ -429,17 +424,22 @@ class WifiChartPainter extends CustomPainter {
       return chart.bottom - t * chart.height;
     }
 
-    // 轴刻度
+    // Y 轴刻度
     for (int r = -100; r <= -30; r += 10) {
       final y = yOf(r);
       _drawText(canvas, '$r dBm', Offset(padding.left - 44, y - 7),
           TextStyle(fontSize: 11, color: textColor.withOpacity(0.75)));
     }
-    for (int ch = (minCh / 5).floor() * 5; ch <= maxCh; ch += 5) {
-      final x = xOf(ch);
-      canvas.drawLine(Offset(x, chart.bottom), Offset(x, chart.bottom + 4), axis);
-      _drawText(canvas, '$ch', Offset(x - 6, chart.bottom + 6),
-          TextStyle(fontSize: 11, color: textColor.withOpacity(0.75)));
+    // X 轴刻度：仅显示“占用的信道”（过多时做抽样避免重叠）
+    if (occupied.isNotEmpty) {
+      final step = (occupied.length <= 18) ? 1 : (occupied.length / 18).ceil();
+      for (int i = 0; i < occupied.length; i += step) {
+        final ch = occupied[i];
+        final x = xOf(ch);
+        canvas.drawLine(Offset(x, chart.bottom), Offset(x, chart.bottom + 4), axis);
+        _drawText(canvas, '$ch', Offset(x - 6, chart.bottom + 6),
+            TextStyle(fontSize: 11, color: textColor.withOpacity(0.75)));
+      }
     }
 
     // 调色板
@@ -465,49 +465,44 @@ class WifiChartPainter extends CustomPainter {
       Colors.brown.shade700,
     ];
 
-    // 钟形峰（高斯近似）
-    const samples = 48; // 曲线采样点数
+    // ===== 钟形峰：从“底线”起，不再“漂浮” =====
+    const samples = 48;
     int colorIdx = 0;
     int labelIdx = 0;
+    final baseY = chart.bottom - 1; // 统一把峰脚落在底部
 
     for (final ap in aps.where((e) => e.channel > 0)) {
       final color = palette[colorIdx++ % palette.length];
 
-      // 根据信段估计半宽（单位：信道）
-      // 2.4G ≈ ±2ch（20MHz），5/6G ≈ ±4ch（20MHz）
+      // 半宽：2.4G≈±2ch；5/6G≈±4ch
       final halfWidthCh = ap.frequency < 2500 ? 2.0 : 4.0;
 
-      // 高斯参数
       final mu = ap.channel.toDouble();
-      final sigma = halfWidthCh / 2.0; // 约使 ±2halfWidth 覆盖 ~4σ
+      final sigma = halfWidthCh / 2.0;
       final topY = yOf(ap.rssi);
-      final baseY = (topY + chart.height * 0.28)
-          .clamp(chart.top + 10, chart.bottom - 6);
-      final amplitude = (baseY - topY).clamp(16.0, 120.0);
+      final amplitude = (baseY - topY).clamp(16.0, 160.0).toDouble();
 
       final leftCh = mu - 3 * sigma;
       final rightCh = mu + 3 * sigma;
 
       Path path = Path();
-      // 上边曲线
       for (int i = 0; i <= samples; i++) {
         final ch = leftCh + (rightCh - leftCh) * (i / samples);
         final x = xOf(ch);
-        final g = math.exp(-0.5 * math.pow((ch - mu) / sigma, 2));
-        final y = (baseY - amplitude * g).clamp(chart.top, chart.bottom);
+        final g = math.exp(
+            -0.5 * math.pow((ch - mu) / sigma, 2).toDouble());
+        final y = (baseY - amplitude * g).toDouble();
         if (i == 0) {
           path.moveTo(x, y);
         } else {
           path.lineTo(x, y);
         }
       }
-      // 右边落到底，再回到左底，闭合
       path
         ..lineTo(xOf(rightCh), baseY)
         ..lineTo(xOf(leftCh), baseY)
         ..close();
 
-      // 渐变填充 + 描边
       final bounds = Rect.fromLTRB(xOf(leftCh), topY, xOf(rightCh), baseY);
       final fill = Paint()
         ..style = PaintingStyle.fill
@@ -524,7 +519,7 @@ class WifiChartPainter extends CustomPainter {
       canvas.drawPath(path, fill);
       canvas.drawPath(path, stroke);
 
-      // 峰顶标签（半透明深底）
+      // 峰顶标签（轻微错位）
       final label = ap.ssid.isEmpty ? ap.bssid : ap.ssid;
       final tp = _measure(
         label,
@@ -533,7 +528,7 @@ class WifiChartPainter extends CustomPainter {
         maxWidth: 160,
       );
       final cx = xOf(mu);
-      final dy = 14 + (labelIdx++ % 3) * 10; // 轻微错位
+      final dy = 14 + (labelIdx++ % 3) * 10;
       final rect = RRect.fromRectAndRadius(
         Rect.fromLTWH(
             cx - tp.width / 2 - 6, topY - tp.height - dy, tp.width + 12, tp.height + 6),
