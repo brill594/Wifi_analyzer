@@ -10,12 +10,12 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 android {
-    compileSdkVersion 35
+    compileSdkVersion 36
     namespace "com.example.wifi_analyzer"
     defaultConfig {
         applicationId "com.example.wifi_analyzer"
-        minSdkVersion 21
-        targetSdkVersion 35
+        minSdkVersion flutter.minSdkVersion
+        targetSdkVersion 36
         versionCode 1
         versionName "1.0.1"
         // versionName / Code 由 pubspec.yaml 映射

@@ -33,9 +33,9 @@ dependencies:
   wifi_scan: ^0.4.1+2      # 扫描 Wi-Fi 接入点
   permission_handler: ^12.0.1
   path_provider: ^2.1.3
-  share_plus: ^7.2.1
+  share_plus: ^12.0.0
   open_filex: ^4.3.4
-  file_saver: ^0.2.12
+  file_saver: ^0.3.1
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
@@ -43,7 +43,17 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_launcher_icons: ^0.14.4
+flutter_launcher_icons:
+  android: true
+  ios: true
 
+  # 最简单：一张图自动出所有尺寸
+  image_path: "assets/app_icon/icon.png"
+
+  # —— 可选：更精致的 Android 自适应图标 & Android 13 单色图标 ——
+  remove_alpha_ios: true        # iOS 去掉透明通道，避免审核问题
+  min_sdk_android: 21
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your
