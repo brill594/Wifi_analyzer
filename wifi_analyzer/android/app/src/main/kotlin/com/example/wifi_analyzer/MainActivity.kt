@@ -1,67 +1,105 @@
 package com.example.wifi_analyzer
-import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
-import android.util.Log
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.wifi.ScanResult
 import android.net.wifi.WifiManager
-import androidx.annotation.RequiresApi
-import androidx.core.app.ActivityCompat
+import android.os.Build
+import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "wifi_std"
+    private var channelResult: MethodChannel.Result? = null
 
-    @RequiresApi(Build.VERSION_CODES.M)
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "getScanStandards" -> {
-                        try {
-                            // 权限检查（Android 13+ 用 NEARBY_WIFI_DEVICES；更低版本用 FINE_LOCATION）
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                if (checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
-                                    != PackageManager.PERMISSION_GRANTED) {
-                                    result.error("PERM", "NEARBY_WIFI_DEVICES not granted", null)
-                                    return@setMethodCallHandler
-                                }
-                            } else {
-                                if (ActivityCompat.checkSelfPermission(this,
-                                        Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                                    result.error("PERM", "ACCESS_FINE_LOCATION not granted", null)
-                                    return@setMethodCallHandler
-                                }
-                            }
-
-                            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                            val scans = wifi.scanResults
-                            val out = scans.map { sr ->
-                                val std = if (Build.VERSION.SDK_INT >= 30) sr.wifiStandard else -1
-                                mapOf(
-                                    "ssid" to (sr.SSID ?: ""),
-                                    "bssid" to (sr.BSSID ?: ""),
-                                    "frequency" to sr.frequency,
-                                    "level" to sr.level,
-                                    "channelWidth" to sr.channelWidth, // 0=20,1=40,2=80,3=160,4=80+80,5=320
-                                    "centerFreq0" to sr.centerFreq0,
-                                    "centerFreq1" to sr.centerFreq1,
-                                    "wifiStandard" to std,              // 1=legacy,4=11n,5=11ac,6=11ax,7=11be
-                                )
-                            }
-                            result.success(out)
-                        } catch (t: Throwable) {
-                            Log.e("wifi_std", "error", t)
-                            result.error("ERR", t.toString(), null)
-                        }
-                    }
-                    else -> result.notImplemented()
-                }
+    // 创建一个广播接收器来监听扫描结果
+    private val wifiScanReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)
+            } else {
+                // 在旧版本上，我们只能假设成功
+                true
             }
+
+            if (success) {
+                sendScanResults()
+            } else {
+                // 扫描失败，也尝试发送一次当前结果
+                sendScanResults()
+            }
+            // 注销接收器，避免内存泄漏
+            try {
+                unregisterReceiver(this)
+            } catch (e: Exception) {
+                // 忽略可能出现的错误
+            }
+        }
+    }
+
+    override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler {
+                call, result ->
+            if (call.method == "getScanStandards") {
+                this.channelResult = result
+                startWifiScan()
+            } else {
+                result.notImplemented()
+            }
+        }
+    }
+
+    private fun startWifiScan() {
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+        val intentFilter = IntentFilter()
+        intentFilter.addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+        registerReceiver(wifiScanReceiver, intentFilter)
+
+        val success = wifiManager.startScan()
+        if (!success) {
+            // 如果 startScan 直接失败，立即发送当前结果
+            sendScanResults()
+            try {
+                unregisterReceiver(wifiScanReceiver)
+            } catch (e: Exception) {
+                // 忽略
+            }
+        }
+    }
+
+    private fun sendScanResults() {
+        if (channelResult == null) return
+
+        try {
+            // 权限检查已由 dart 端 `wifi_scan` 插件完成，这里直接获取
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            // 必须用 @Suppress("DEPRECATION") 因为这是唯一能在所有版本上获取结果的方法
+            @Suppress("DEPRECATION")
+            val scanResults: List<ScanResult> = wifiManager.scanResults ?: emptyList()
+
+            val resultsList = scanResults.map { scanResult ->
+                val map = mutableMapOf<String, Any?>()
+                map["bssid"] = scanResult.BSSID
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    map["wifiStandardCode"] = scanResult.wifiStandard
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    map["channelWidthCode"] = scanResult.channelWidth
+                    map["centerFreq0"] = scanResult.centerFreq0
+                    map["centerFreq1"] = scanResult.centerFreq1
+                }
+                map
+            }
+            channelResult?.success(resultsList)
+        } catch (e: Exception) {
+            channelResult?.error("NATIVE_ERROR", "Failed to get scan results.", e.message)
+        } finally {
+            channelResult = null
+        }
     }
 }
-

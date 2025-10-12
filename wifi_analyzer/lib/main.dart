@@ -38,6 +38,7 @@ Future<Map<String, Map<String, dynamic>>> fetchSystemScanStandards() async {
 // 把系统常量转成人类可读
 String labelFromWifiStandard(int? code, {required int freq, required int bw}) {
   switch (code) {
+    case 8: return '802.11be';
     case 7: return '802.11be';
     case 6: return '802.11ax';
     case 5: return '802.11ac';
@@ -321,6 +322,7 @@ class _HomePageState extends State<HomePage> {
       status = '正在请求权限 / 检查环境…';
     });
 
+    // wifi_scan 插件会处理权限请求
     final can = await WiFiScan.instance.canGetScannedResults(askPermissions: true);
     if (can != CanGetScannedResults.yes) {
       setState(() {
@@ -339,20 +341,23 @@ class _HomePageState extends State<HomePage> {
     await WiFiScan.instance.startScan();
     final results = await WiFiScan.instance.getScannedResults();
 
+    // 调用我们优化的原生通道获取系统标准信息
+    final systemStandards = await fetchSystemScanStandards();
+
     final mapped = results.map((e) {
-      final bw = _inferBandwidthMhz(e);
-      final ed = e as dynamic; // ← 关键：转 dynamic
+      final bssidLower = e.bssid.toLowerCase();
+      // 从原生结果中查找匹配的AP信息
+      final systemInfo = systemStandards[bssidLower] ?? {};
 
-      // 原始字段（系统API）
-      String? stdRaw;
-      try { stdRaw = (ed.wifiStandard ?? ed.standard)?.toString(); } catch (_) {}
-      String? cwRaw;
-      try { cwRaw = ed.channelWidth?.toString(); } catch (_) {}
-      int? cf0; try { final v = ed.centerFrequency0; if (v is int) cf0 = v; } catch (_) {}
-      int? cf1; try { final v = ed.centerFrequency1; if (v is int) cf1 = v; } catch (_) {}
+      // 优先使用原生通道获取的值
+      final int? sysWifiStdCode = systemInfo['wifiStandardCode'] as int?;
+      final int? sysChanWidthCode = systemInfo['channelWidthCode'] as int?;
 
-      final code  = _wifiStandardCode(e);
-      final label = _stdLabelFromCode(code, freq: e.frequency, bandwidthMhz: bw);
+      // 使用 channelWidthCodeToMhz 转换带宽
+      final bw = channelWidthCodeToMhz(sysChanWidthCode);
+
+      // 使用 labelFromWifiStandard 转换标签
+      final label = labelFromWifiStandard(sysWifiStdCode, freq: e.frequency, bw: bw);
 
       return AP(
         ssid: e.ssid,
@@ -361,17 +366,17 @@ class _HomePageState extends State<HomePage> {
         frequency: e.frequency,
         channel: freqToChannel(e.frequency),
         bandwidthMhz: bw,
-        standard: label,                    // ← 用系统值优先（经 _stdLabelFromCode）
-        capabilities: (ed.capabilities ?? '').toString(),
-        wifiStandardCode: code,
-        wifiStandardRaw: stdRaw,
-        channelWidthRaw: cwRaw,
-        centerFreq0: cf0,
-        centerFreq1: cf1,
+        standard: label,
+        capabilities: e.capabilities,
+        // 保存从原生通道获取的详细信息，用于详情弹窗
+        wifiStandardCode: sysWifiStdCode,
+        wifiStandardRaw: systemInfo['wifiStandardRaw'] as String?,
+        channelWidthRaw: systemInfo['channelWidthRaw'] as String?,
+        centerFreq0: systemInfo['centerFreq0'] as int?,
+        centerFreq1: systemInfo['centerFreq1'] as int?,
       );
     }).toList()
       ..sort((a, b) => b.rssi.compareTo(a.rssi));
-
 
     setState(() {
       aps = mapped;
@@ -637,7 +642,7 @@ class _ApTable extends StatelessWidget {
               _kv('channelWidthRaw', ap.channelWidthRaw ?? '—'),
               _kv('centerFreq0 / 1', '${ap.centerFreq0 ?? '—'} / ${ap.centerFreq1 ?? '—'} MHz'),
               _kv('频率 / 信道', '${ap.frequency} MHz / ch ${ap.channel}'),
-              _kv('带宽(估)', '${ap.bandwidthMhz} MHz'),
+              _kv('带宽', '${ap.bandwidthMhz} MHz'),
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 childrenPadding: EdgeInsets.zero,

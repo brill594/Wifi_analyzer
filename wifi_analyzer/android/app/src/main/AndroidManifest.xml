@@ -2,6 +2,7 @@
     <!-- Android 13+：专用 Wi-Fi 扫描权限，不关联定位用途 -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
     <!-- 仍然建议保留精确定位：某些 Wi-Fi API 在 Android 13+ 依然要求 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
