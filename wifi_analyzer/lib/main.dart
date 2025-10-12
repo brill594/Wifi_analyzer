@@ -1,13 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:wifi_scan/wifi_scan.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:file_saver/file_saver.dart';
-import 'dart:ui' show FontFeature;
 import 'package:flutter/services.dart';
 
 void main() {
@@ -36,7 +34,14 @@ Future<Map<String, Map<String, dynamic>>> fetchSystemScanStandards() async {
 }
 
 // 把系统常量转成人类可读
-String labelFromWifiStandard(int? code, {required int freq, required int bw}) {
+/// 终极 Wi-Fi 标准判断函数（三层校验）
+String determineWifiStandard({
+  required int? code,
+  required String capabilities,
+  required int freq,
+  required int bw,
+}) {
+  // --- 第一层：相信可靠的系统 Code ---
   switch (code) {
     case 8: return '802.11be';
     case 7: return '802.11be';
@@ -45,10 +50,20 @@ String labelFromWifiStandard(int? code, {required int freq, required int bw}) {
     case 4: return '802.11n';
     case 1: return (freq < 2500) ? '802.11b/g' : '802.11a';
   }
-  // 拿不到系统值：保守兜底
-  if (freq >= 5955) return '802.11ax';
+
+  // --- 第二层：如果 Code 不可靠，解析 capabilities 字符串 (最重要！) ---
+  final caps = capabilities.toUpperCase();
+  // 必须从新到旧判断，因为新标准会兼容旧标准的标识
+  if (caps.contains('EHT')) return '802.11be';
+  if (caps.contains('HE')) return '802.11ax';
+  if (caps.contains('VHT')) return '802.11ac';
+  if (caps.contains('HT')) return '802.11n';
+
+  // --- 第三层：如果 capabilities 也无效，启用最终兜底 ---
+  if (freq >= 5955) return '802.11ax/be'; // 6GHz 频段
   if (bw >= 320) return '802.11be';
-  if (bw >= 80)  return '802.11ac/ax';
+  if (bw >= 160) return '802.11ac/ax/be'; // 160MHz 可能是 ac/ax/be
+  if (bw >= 80)  return '802.11ac/ax';   // 80MHz 可能是 ac/ax
   if (bw == 40)  return '802.11n';
   return (freq < 2500) ? '802.11b/g' : '802.11a';
 }
@@ -186,48 +201,6 @@ int _inferBandwidthMhz(dynamic e) {
   return 20;
 }
 
-String _inferStandard(String caps, int freq) {
-  // 将 capabilities 字符串转为大写，方便比较
-  final c = caps.toUpperCase();
-
-  // 1. 检查 802.11ax (Wi-Fi 6/6E)
-  // 'HE' 是 High Efficiency 的缩写。
-  // freq >= 5925 是 Wi-Fi 6E 的 6GHz 频段，只有 ax 标准支持。
-  if (c.contains('HE') || c.contains('11AX') || freq >= 5925) {
-    return '802.11ax';
-  }
-
-  // 2. 检查 802.11ac (Wi-Fi 5)
-  // 'VHT' 是 Very High Throughput 的缩写，是 ac 标准的独有特征。
-  // 删除了原来有问题的频率判断。一个网络是 ac 当且仅当它支持 VHT。
-  if (c.contains('VHT') || c.contains('11AC')) {
-    return '802.11ac';
-  }
-
-  // 3. 检查 802.11n (Wi-Fi 4)
-  // 'HT' 是 High Throughput 的缩写。
-  // 注意：ax 和 ac 网络也支持 HT，所以这个检查必须放在它们之后。
-  if (c.contains('HT') || c.contains('11N')) {
-    return '802.11n';
-  }
-
-  // 4. 如果以上都不是，再根据频率判断是 a 还是 b/g
-  // 此时可以确定网络不是 ax, ac, 或 n。
-  if (freq >= 5000) {
-    // 5GHz 频段的非 ax/ac/n 网络，基本就是 802.11a 了。
-    return c;
-  }
-
-  if (freq > 2400 && freq < 2500) {
-    // 2.4GHz 频段的非 ax/n 网络，就是 b/g。
-    // 在只看 capabilities 和 frequency 的情况下，很难区分 b 和 g。
-    return '802.11b/g';
-  }
-
-  // 5. 如果所有条件都不满足，返回未知
-  return '?';
-}
-
 /* ------------------------------ 页面 ------------------------------ */
 
 class HomePage extends StatefulWidget {
@@ -252,41 +225,6 @@ class _HomePageState extends State<HomePage> {
     searchCtrl.dispose();
     super.dispose();
   }
-  int? _wifiStandardCode(dynamic e) {
-    // 直接 int
-    try { final v = e.wifiStandard; if (v is int) return v; } catch (_) {}
-    try { final v = e.standard;      if (v is int) return v; } catch (_) {}
-    // 从枚举名/字符串名提取
-    String? s;
-    try { s ??= e.wifiStandard?.toString(); } catch (_) {}
-    try { s ??= e.standard?.toString();      } catch (_) {}
-    if (s != null) {
-      final u = s.toUpperCase();
-      if (u.contains('11BE') || u.contains('EHT')) return 7; // WIFI_STANDARD_11BE
-      if (u.contains('11AX') || u.contains('HE'))  return 6; // WIFI_STANDARD_11AX
-      if (u.contains('11AC') || u.contains('VHT')) return 5; // WIFI_STANDARD_11AC
-      if (u.contains('11N')  || u.contains('HT'))  return 4; // WIFI_STANDARD_11N
-      if (u.contains('LEGACY')||u.contains('11A')||u.contains('11G')||u.contains('11B')) return 1;
-    }
-    return null;
-  }
-
-  String _stdLabelFromCode(int? code, {required int freq, required int bandwidthMhz}) {
-    switch (code) {
-      case 7: return '802.11be';
-      case 6: return '802.11ax';
-      case 5: return '802.11ac';
-      case 4: return '802.11n';
-      case 1: return (freq < 2500) ? '802.11b/g' : '802.11a';
-    }
-    // 兜底（不再用 capabilities）：尽量保守避免误判
-    if (freq >= 5955) return '802.11ax';       // 6GHz 属于 6E(ax)
-    if (bandwidthMhz >= 320) return '802.11be';
-    if (bandwidthMhz >= 80)  return '802.11ac/ax';
-    if (bandwidthMhz == 40)  return '802.11n';
-    return (freq < 2500) ? '802.11b/g' : '802.11a';
-  }
-
   /* ---------- JSON 文件工具 ---------- */
 
   Future<File> _jsonFile() async {
@@ -322,43 +260,32 @@ class _HomePageState extends State<HomePage> {
       status = '正在请求权限 / 检查环境…';
     });
 
-    // wifi_scan 插件会处理权限请求
-    final can = await WiFiScan.instance.canGetScannedResults(askPermissions: true);
-    if (can != CanGetScannedResults.yes) {
-      setState(() {
-        scanning = false;
-        status = switch (can) {
-          CanGetScannedResults.notSupported => '此设备不支持扫描。',
-          CanGetScannedResults.noLocationPermissionDenied => '未授予必要权限（位置 / 附近 Wi-Fi）。',
-          CanGetScannedResults.noLocationServiceDisabled => '请开启系统定位后重试。',
-          _ => '无法扫描（状态：$can）',
-        };
-      });
-      return;
-    }
-
-    setState(() => status = '正在扫描…');
-    await WiFiScan.instance.startScan();
     final results = await WiFiScan.instance.getScannedResults();
-
-    // 调用我们优化的原生通道获取系统标准信息
     final systemStandards = await fetchSystemScanStandards();
 
     final mapped = results.map((e) {
       final bssidLower = e.bssid.toLowerCase();
-      // 从原生结果中查找匹配的AP信息
       final systemInfo = systemStandards[bssidLower] ?? {};
 
-      // 优先使用原生通道获取的值
+      // --- 完整地从原生数据中提取所有字段 ---
       final int? sysWifiStdCode = systemInfo['wifiStandardCode'] as int?;
       final int? sysChanWidthCode = systemInfo['channelWidthCode'] as int?;
+      final String caps = (systemInfo['capabilities'] as String?) ?? e.capabilities;
+      final String? sysWifiStdRaw = systemInfo['wifiStandardRaw'] as String?;
+      final String? sysChanWidthRaw = systemInfo['channelWidthRaw'] as String?;
+      final int? sysCenterFreq0 = systemInfo['centerFreq0'] as int?;
+      final int? sysCenterFreq1 = systemInfo['centerFreq1'] as int?;
 
-      // 使用 channelWidthCodeToMhz 转换带宽
       final bw = channelWidthCodeToMhz(sysChanWidthCode);
 
-      // 使用 labelFromWifiStandard 转换标签
-      final label = labelFromWifiStandard(sysWifiStdCode, freq: e.frequency, bw: bw);
+      final label = determineWifiStandard(
+        code: sysWifiStdCode,
+        capabilities: caps,
+        freq: e.frequency,
+        bw: bw,
+      );
 
+      // --- 将所有字段完整地传递给 AP 构造函数 ---
       return AP(
         ssid: e.ssid,
         bssid: e.bssid,
@@ -367,13 +294,14 @@ class _HomePageState extends State<HomePage> {
         channel: freqToChannel(e.frequency),
         bandwidthMhz: bw,
         standard: label,
-        capabilities: e.capabilities,
-        // 保存从原生通道获取的详细信息，用于详情弹窗
+        capabilities: caps,
+
+        // --- 这是最关键的修复：把所有原生数据都保存起来！ ---
         wifiStandardCode: sysWifiStdCode,
-        wifiStandardRaw: systemInfo['wifiStandardRaw'] as String?,
-        channelWidthRaw: systemInfo['channelWidthRaw'] as String?,
-        centerFreq0: systemInfo['centerFreq0'] as int?,
-        centerFreq1: systemInfo['centerFreq1'] as int?,
+        wifiStandardRaw: sysWifiStdRaw,
+        channelWidthRaw: sysChanWidthRaw,
+        centerFreq0: sysCenterFreq0,
+        centerFreq1: sysCenterFreq1,
       );
     }).toList()
       ..sort((a, b) => b.rssi.compareTo(a.rssi));
@@ -646,7 +574,7 @@ class _ApTable extends StatelessWidget {
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 childrenPadding: EdgeInsets.zero,
-                title: const Text('capabilities（仅展示，不参与判断）'),
+                title: const Text('capabilities'),
                 children: [
                   Container(
                     width: double.infinity,
